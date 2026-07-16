@@ -30,10 +30,7 @@ func writePNG(_ image: NSImage, to url: URL) throws {
 }
 
 func cropRectForVisibleLogo(in image: NSImage) -> NSRect {
-    guard
-        let tiff = image.tiffRepresentation,
-        let bitmap = NSBitmapImageRep(data: tiff)
-    else {
+    guard let bitmap = bitmapByDrawingInDeviceRGB(image) else {
         return NSRect(origin: .zero, size: image.size)
     }
 
@@ -44,11 +41,11 @@ func cropRectForVisibleLogo(in image: NSImage) -> NSRect {
 
     for y in 0..<bitmap.pixelsHigh {
         for x in 0..<bitmap.pixelsWide {
-            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
+            guard let color = rgbaComponents(atX: x, y: y, in: bitmap) else {
                 continue
             }
 
-            let isWhiteBackground = color.redComponent > 0.94 && color.greenComponent > 0.94 && color.blueComponent > 0.94
+            let isWhiteBackground = color.red > 0.94 && color.green > 0.94 && color.blue > 0.94
             if !isWhiteBackground {
                 minX = min(minX, x)
                 minY = min(minY, y)
@@ -90,6 +87,115 @@ func renderSourceLogo(_ source: NSImage, size: CGFloat, cropRect: NSRect) -> NSI
     )
     image.unlockFocus()
     return image
+}
+
+func imageByMakingWhiteTransparent(_ image: NSImage) -> NSImage {
+    guard
+        let sourceBitmap = bitmapByDrawingInDeviceRGB(image),
+        let outputBitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: sourceBitmap.pixelsWide,
+            pixelsHigh: sourceBitmap.pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+    else {
+        return image
+    }
+
+    for y in 0..<sourceBitmap.pixelsHigh {
+        for x in 0..<sourceBitmap.pixelsWide {
+            guard let color = rgbaComponents(atX: x, y: y, in: sourceBitmap) else {
+                continue
+            }
+
+            let red = color.red
+            let green = color.green
+            let blue = color.blue
+            let brightness = max(red, green, blue)
+            let darkness = min(red, green, blue)
+            let saturation = brightness - darkness
+            let isWhiteBackground = darkness > 0.92 || (brightness > 0.86 && saturation < 0.045)
+            let alpha: CGFloat = isWhiteBackground ? 0 : color.alpha
+
+            setRGBA(red: red, green: green, blue: blue, alpha: alpha, atX: x, y: y, in: outputBitmap)
+        }
+    }
+
+    let output = NSImage(size: NSSize(width: sourceBitmap.pixelsWide, height: sourceBitmap.pixelsHigh))
+    output.addRepresentation(outputBitmap)
+    return output
+}
+
+func bitmapByDrawingInDeviceRGB(_ image: NSImage) -> NSBitmapImageRep? {
+    guard
+        let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(image.size.width),
+            pixelsHigh: Int(image.size.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+    else {
+        return nil
+    }
+
+    bitmap.size = image.size
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    image.draw(in: NSRect(origin: .zero, size: image.size))
+    NSGraphicsContext.restoreGraphicsState()
+
+    return bitmap
+}
+
+func rgbaComponents(atX x: Int, y: Int, in bitmap: NSBitmapImageRep) -> (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat)? {
+    guard let data = bitmap.bitmapData else {
+        return nil
+    }
+
+    let samplesPerPixel = bitmap.samplesPerPixel
+    let offset = y * bitmap.bytesPerRow + x * samplesPerPixel
+    let pixel = data.advanced(by: offset)
+    let alpha: CGFloat = samplesPerPixel >= 4 ? CGFloat(pixel[3]) / 255 : 1
+
+    return (
+        red: CGFloat(pixel[0]) / 255,
+        green: CGFloat(pixel[1]) / 255,
+        blue: CGFloat(pixel[2]) / 255,
+        alpha: alpha
+    )
+}
+
+func setRGBA(red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat, atX x: Int, y: Int, in bitmap: NSBitmapImageRep) {
+    guard let data = bitmap.bitmapData else {
+        return
+    }
+
+    let samplesPerPixel = bitmap.samplesPerPixel
+    let offset = y * bitmap.bytesPerRow + x * samplesPerPixel
+    let pixel = data.advanced(by: offset)
+    pixel[0] = byteValue(red)
+    pixel[1] = byteValue(green)
+    pixel[2] = byteValue(blue)
+    if samplesPerPixel >= 4 {
+        pixel[3] = byteValue(alpha)
+    }
+}
+
+func byteValue(_ component: CGFloat) -> UInt8 {
+    UInt8(max(0, min(255, Int((component * 255).rounded()))))
 }
 
 func makeImage(size: CGFloat, transparent: Bool, template: Bool) -> NSImage {
@@ -235,11 +341,12 @@ let iconSizes: [(String, CGFloat)] = [
 
 if FileManager.default.fileExists(atPath: sourceLogoURL.path), let sourceLogo = NSImage(contentsOf: sourceLogoURL) {
     let cropRect = cropRectForVisibleLogo(in: sourceLogo)
-    try writePNG(renderSourceLogo(sourceLogo, size: 1024, cropRect: cropRect), to: resourcesURL.appendingPathComponent("RatLogo.png"))
-    try writePNG(renderSourceLogo(sourceLogo, size: 64, cropRect: cropRect), to: resourcesURL.appendingPathComponent("RatMenuBarIcon.png"))
+    let transparentLogo = imageByMakingWhiteTransparent(sourceLogo)
+    try writePNG(renderSourceLogo(transparentLogo, size: 1024, cropRect: cropRect), to: resourcesURL.appendingPathComponent("RatLogo.png"))
+    try writePNG(renderSourceLogo(transparentLogo, size: 64, cropRect: cropRect), to: resourcesURL.appendingPathComponent("RatMenuBarIcon.png"))
 
     for (name, size) in iconSizes {
-        try writePNG(renderSourceLogo(sourceLogo, size: size, cropRect: cropRect), to: iconsetURL.appendingPathComponent(name))
+        try writePNG(renderSourceLogo(transparentLogo, size: size, cropRect: cropRect), to: iconsetURL.appendingPathComponent(name))
     }
 } else {
     let appIcon1024 = makeImage(size: 1024, transparent: false, template: false)
