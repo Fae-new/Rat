@@ -9,8 +9,9 @@ if [[ ! -d "$APP_PATH" ]]; then
   "$ROOT_DIR/scripts/build-release.sh" >/dev/null
 fi
 
+pkill -x "$APP_NAME" 2>/dev/null || true
 rm -rf "/Applications/$APP_NAME.app"
 cp -R "$APP_PATH" /Applications/
-open "/Applications/$APP_NAME.app"
+open -n "/Applications/$APP_NAME.app"
 
 echo "/Applications/$APP_NAME.app"
